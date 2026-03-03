@@ -664,6 +664,7 @@ async function maybeQueueSubagentAnnounce(params: {
   summaryLine?: string;
   requesterOrigin?: DeliveryContext;
   internalEvents?: AgentInternalEvent[];
+  allowIdleCoalescing?: boolean;
   signal?: AbortSignal;
 }): Promise<"steered" | "queued" | "none"> {
   if (params.signal?.aborted) {
@@ -696,8 +697,14 @@ async function maybeQueueSubagentAnnounce(params: {
     queueSettings.mode === "collect" ||
     queueSettings.mode === "steer-backlog" ||
     queueSettings.mode === "interrupt";
-  if (isActive && (shouldFollowup || queueSettings.mode === "steer")) {
+  const shouldQueueForIdleCoalescing =
+    params.allowIdleCoalescing === true && !isActive && shouldFollowup;
+  if (
+    (isActive && (shouldFollowup || queueSettings.mode === "steer")) ||
+    shouldQueueForIdleCoalescing
+  ) {
     const origin = resolveAnnounceOrigin(entry, params.requesterOrigin);
+    const coalescedDebounceMs = Math.max(2000, queueSettings.debounceMs ?? 0);
     enqueueAnnounce({
       key: buildAnnounceQueueKey(canonicalKey, origin),
       item: {
@@ -709,7 +716,13 @@ async function maybeQueueSubagentAnnounce(params: {
         sessionKey: canonicalKey,
         origin,
       },
-      settings: queueSettings,
+      settings: shouldQueueForIdleCoalescing
+        ? {
+            ...queueSettings,
+            mode: "collect",
+            debounceMs: coalescedDebounceMs,
+          }
+        : queueSettings,
       send: sendAnnounce,
     });
     return "queued";
@@ -839,6 +852,10 @@ async function sendSubagentAnnounceDirectly(params: {
           path: "direct",
         };
       }
+      return {
+        delivered: false,
+        path: "none",
+      };
     }
 
     const directOrigin = normalizeDeliveryContext(params.directOrigin);
@@ -915,6 +932,7 @@ async function deliverSubagentAnnouncement(params: {
   bestEffortDeliver?: boolean;
   completionRouteMode?: "bound" | "fallback" | "hook";
   spawnMode?: SpawnSubagentMode;
+  allowIdleCoalescing?: boolean;
   directIdempotencyKey: string;
   currentRunId?: string;
   signal?: AbortSignal;
@@ -931,6 +949,7 @@ async function deliverSubagentAnnouncement(params: {
         summaryLine: params.summaryLine,
         requesterOrigin: params.requesterOrigin,
         internalEvents: params.internalEvents,
+        allowIdleCoalescing: params.allowIdleCoalescing,
         signal: params.signal,
       }),
     direct: async () =>
@@ -1408,6 +1427,7 @@ export async function runSubagentAnnounceFlow(params: {
       bestEffortDeliver: params.bestEffortDeliver,
       completionRouteMode: completionResolution.routeMode,
       spawnMode: params.spawnMode,
+      allowIdleCoalescing: expectsCompletionMessage && remainingActiveSubagentRuns > 0,
       directIdempotencyKey,
       currentRunId: params.childRunId,
       signal: params.signal,
